@@ -1,0 +1,6 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/RailFlow.Core/RailFlow.Core.csproj" />
+    <Project Path="src/RailFlow.Infrastructure/RailFlow.Infrastructure.csproj" />
+  </Folder>
+</Solution>
