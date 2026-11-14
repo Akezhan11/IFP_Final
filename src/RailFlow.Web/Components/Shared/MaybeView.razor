@@ -1,0 +1,77 @@
+@typeparam TItem
+@* Renders a Maybe<TItem>: one template per case, with sensible defaults for Nothing and Error. *@
+
+<div class="maybe-view" role="region" aria-live="polite">
+    @switch (State)
+    {
+        case Something<TItem> { InnerValue: { } item }:
+            @if (SomethingTemplate is not null)
+            {
+                @SomethingTemplate(item)
+            }
+            break;
+
+        case Error<TItem> { ErrorDetails: var ex }:
+            @if (ErrorTemplate is not null)
+            {
+                @ErrorTemplate(ex)
+            }
+            else
+            {
+                <div class="alert err" role="alert">
+                    <strong>The request could not be completed</strong>
+                    <p>@ex.Message</p>
+                    @if (ActiveRole == UserRole.Dispatcher && OnRetry.HasDelegate)
+                    {
+                        <div class="actions">
+                            <button class="btn btn-sm" @onclick="() => OnRetry.InvokeAsync()">Clear simulated failures and retry</button>
+                        </div>
+                    }
+                    else
+                    {
+                        <p class="muted small">Please try again later.</p>
+                    }
+                </div>
+            }
+            break;
+
+        case Nothing<TItem>:
+            @if (NothingTemplate is not null)
+            {
+                @NothingTemplate
+            }
+            else
+            {
+                <div class="alert warn">
+                    <strong>No result</strong>
+                    <p>Nothing matched the request.</p>
+                </div>
+            }
+            break;
+
+        default:
+            <p class="muted">No data yet.</p>
+            break;
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired]
+    public Maybe<TItem>? State { get; set; }
+
+    [Parameter]
+    public RenderFragment<TItem>? SomethingTemplate { get; set; }
+
+    [Parameter]
+    public RenderFragment? NothingTemplate { get; set; }
+
+    [Parameter]
+    public RenderFragment<Exception>? ErrorTemplate { get; set; }
+
+    [Parameter]
+    public EventCallback OnRetry { get; set; }
+
+    /// <summary>Provided by the page through a CascadingValue; only dispatchers can reset simulated failures.</summary>
+    [CascadingParameter]
+    public UserRole ActiveRole { get; set; }
+}

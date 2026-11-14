@@ -1,0 +1,31 @@
+@* Numbered list of workflow stages with a status tag each (booking progress). Renders nothing when empty. *@
+
+@if (Stages.Count > 0)
+{
+    <ol class="steps vertical" aria-live="polite">
+        @for (var i = 0; i < Stages.Count; i++)
+        {
+            var stage = Stages[i];
+            var tone = ToneFor(stage.Status);
+            <li class="step @tone">
+                <span class="step-num">@(i + 1)</span>
+                <span class="step-body">
+                    <span class="step-title">@stage.Name <span class="tag @tone">@stage.Status</span></span>
+                    <span class="step-detail">@stage.Detail</span>
+                </span>
+            </li>
+        }
+    </ol>
+}
+
+@code {
+    [Parameter, EditorRequired]
+    public IReadOnlyList<StageView> Stages { get; set; } = [];
+
+    private static string ToneFor(StageStatus status) => status switch
+    {
+        StageStatus.Done => "ok",
+        StageStatus.Failed => "err",
+        _ => ""
+    };
+}
