@@ -1,0 +1,149 @@
+@* Timetable of the last priced search from the chosen departure time, and the train's progress along it. *@
+
+@if (Route is null || _timetable.IsEmpty)
+{
+    <section class="card">
+        <div class="card-head"><h2>Timetable</h2></div>
+        <div class="empty-state">
+            <p>Search for a route on <strong>Plan a trip</strong> to see its timetable.</p>
+            <button class="btn btn-sm btn-primary" @onclick="() => OnPlanTrip.InvokeAsync()">Plan a trip</button>
+        </div>
+    </section>
+}
+else
+{
+    <section class="card">
+        <div class="card-head">
+            <div>
+                <h2>Timetable</h2>
+                <p class="card-sub">
+                    @UiText.Station(Route.Origin) → @UiText.Station(Route.Destination), departing @UiText.Day(TravelDate) at @Departure.ToString("HH:mm").
+                    Trains stop for @RecursiveTimetable.DwellMinutes minutes at each change.
+                </p>
+            </div>
+            <button class="btn btn-sm" @onclick="() => OnPlanTrip.InvokeAsync()">Change trip</button>
+        </div>
+
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Station</th>
+                        <th class="num">Arrives</th>
+                        <th class="num">Departs</th>
+                        <th>Next train</th>
+                        <th class="num">Distance</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var stop in _timetable)
+                    {
+                        var isFirst = stop.StopIndex == 0;
+                        var isLast = stop.StopIndex == _timetable.Count - 1;
+                        <tr>
+                            <td>@UiText.Station(stop.Station)</td>
+                            <td class="num">@(isFirst ? "—" : stop.Arrival.ToString("HH:mm") + (stop.DayOffset > 0 ? $" +{stop.DayOffset}d" : ""))</td>
+                            <td class="num">@(isLast ? "—" : stop.Departure.ToString("HH:mm"))</td>
+                            <td>@(isLast ? "" : _timetable[stop.StopIndex + 1].LineName)</td>
+                            <td class="num">@stop.CumulativeKm.ToString("N0") km</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+
+        <HowItWorks>
+            The timetable is built recursively: each call adds one stop and, instead of calling itself, returns
+            <code>More(() =&gt; next call)</code>. <code>Trampoline.Run</code> executes these steps in a loop, so even a
+            very long route does not overflow the call stack (the Lab tab runs one with 200,000 sections).
+        </HowItWorks>
+    </section>
+
+    <section class="card">
+        <details class="progress-details" open="@Options.ShowCourseNotes">
+            <summary class="card-head summary-head">
+                <div>
+                    <h2>Journey progress</h2>
+                    <p class="card-sub">Where the train is every @StepMinutes minutes (@_progress.Count steps), using the same running times and stops as the timetable.</p>
+                </div>
+                <span class="tag">@(_progress.Count) steps</span>
+            </summary>
+
+            <div class="table-wrap scroll" style="margin-top:0.75rem;">
+                <table>
+                    <thead>
+                        <tr>
+                            <th class="num">Time</th>
+                            <th>Last station</th>
+                            <th class="num">Distance</th>
+                            <th>Status</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var step in _progress)
+                        {
+                            <tr>
+                                <td class="num">@ClockTime(step.AccumulatedMinutes)</td>
+                                <td>@UiText.Station(step.CurrentStation)</td>
+                                <td class="num">@step.ProgressKm.ToString("N0") of @step.TotalDistanceKm.ToString("N0") km</td>
+                                <td>@step.LastEventDescription</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+
+            <HowItWorks>
+                An indefinite loop written with <code>IterateStepsUntil</code>: each step is a new immutable record created
+                with <code>with</code>, and the pure function <code>PositionAt</code> says where the train is at that minute.
+                The loop stops when the destination is reached, not after a fixed number of steps.
+            </HowItWorks>
+        </details>
+    </section>
+}
+
+@code {
+    private const int StepMinutes = 20;
+
+    /// <summary>The last priced route, or null when there is none.</summary>
+    [Parameter]
+    public PlannedRoute? Route { get; set; }
+
+    // "23:50", or "00:30 +1d" after midnight.
+    private string ClockTime(int minutesAfterDeparture)
+    {
+        var total = Departure.ToTimeSpan().TotalMinutes + minutesAfterDeparture;
+        var days = (int)(total / (24 * 60));
+        var time = Departure.AddMinutes(minutesAfterDeparture).ToString("HH:mm");
+        return days > 0 ? $"{time} +{days}d" : time;
+    }
+
+    /// <summary>Travel date chosen on the trip form.</summary>
+    [Parameter]
+    public DateOnly TravelDate { get; set; } = DateOnly.FromDateTime(DateTime.Today);
+
+    /// <summary>Departure time chosen on the trip form.</summary>
+    [Parameter]
+    public TimeOnly Departure { get; set; } = new(8, 0);
+
+    [Parameter]
+    public EventCallback OnPlanTrip { get; set; }
+
+    [CascadingParameter]
+    public ViewOptions Options { get; set; } = ViewOptions.Default;
+
+    private ImmutableList<TimetableStop> _timetable = ImmutableList<TimetableStop>.Empty;
+    private ImmutableList<TransitSimulationState> _progress = ImmutableList<TransitSimulationState>.Empty;
+    private (PlannedRoute? Route, TimeOnly Departure) _builtFor;
+
+    protected override void OnParametersSet()
+    {
+        // Rebuild only when the trip changed; both results are pure functions of (route, departure).
+        if (_builtFor == (Route, Departure))
+            return;
+
+        _builtFor = (Route, Departure);
+        _timetable = Route is null ? ImmutableList<TimetableStop>.Empty : RecursiveTimetable.BuildTimetable(Route, Departure);
+        _progress = Route is null ? ImmutableList<TransitSimulationState>.Empty : TrainSimulation.RunTransitSimulation(Route, StepMinutes);
+    }
+}
