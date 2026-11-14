@@ -1,0 +1,447 @@
+@page "/"
+@rendermode InteractiveServer
+@implements IDisposable
+@inject RailwayPipelineOrchestrator Orchestrator
+@inject OperationsControls Operations
+@inject ImmutableAppStateContainer AppState
+@inject ILogger<Home> Logger
+@inject NavigationManager Navigation
+
+@* The single page of the app. It owns what more than one tab needs: the signed-in user and role, the
+   trip search (form, validation, last report, Undo/Redo) and the per-session state of the tabs, which
+   has to outlive the tab components because only the open tab is rendered. Everything else is done by
+   one component per tab in Components/Tabs. Which tabs exist depends on the role (Network and Dispatcher
+   are for dispatchers) and on the "Course notes" switch (the Lab tab and the How-it-works notes). The
+   role and the view options are cascaded to every component. *@
+
+<PageTitle>RailFlow — rail journeys and bookings</PageTitle>
+
+<CascadingValue Value="AppState.CurrentRole">
+<CascadingValue Value="_viewOptions">
+    <header class="app-header">
+        <div class="container">
+            <div class="header-row">
+                <div class="brand">
+                    <svg class="brand-mark" width="30" height="30" viewBox="0 0 32 32" aria-hidden="true">
+                        <rect width="32" height="32" rx="6" fill="var(--accent)" />
+                        <path d="M12 6 L9.5 26 M20 6 L22.5 26" stroke="#fff" stroke-width="2" stroke-linecap="round" />
+                        <path d="M11.2 11h9.6 M10.6 16h10.8 M10 21h12" stroke="#fff" stroke-width="1.5" stroke-linecap="round" opacity="0.85" />
+                    </svg>
+                    <div>
+                        <h1>RailFlow</h1>
+                        <p>Rail journeys across Europe</p>
+                    </div>
+                </div>
+
+                <div class="header-actions">
+                    <label class="notes-toggle" title="Show how the functional techniques from the course are used">
+                        <input type="checkbox" class="switch" checked="@_viewOptions.ShowCourseNotes" @onchange="ToggleCourseNotes" />
+                        Course notes
+                    </label>
+                    @if (_signedInName is not null)
+                    {
+                        <span><strong>@_signedInName</strong></span>
+                        <span class="tag">@(IsDispatcher ? "Dispatcher" : "Passenger")</span>
+                        <form method="post" action="account/logout" class="inline-form">
+                            <AntiforgeryToken />
+                            <button type="submit" class="btn btn-sm">Sign out</button>
+                        </form>
+                    }
+                    else
+                    {
+                        <a class="btn btn-sm" href="@LoginHrefFor(_activeTab)">Sign in</a>
+                    }
+                </div>
+            </div>
+
+            <nav class="tabs" role="tablist" aria-label="Sections">
+                @foreach (var group in VisibleTabs.GroupBy(t => t.Group))
+                {
+                    @if (group.Key is not null)
+                    {
+                        <span class="tab-group-label" aria-hidden="true">@group.Key</span>
+                    }
+                    @foreach (var tab in group)
+                    {
+                        var id = tab.Id;
+                        var active = _activeTab == id;
+                        <button role="tab" id="tab-@id" class="tab @(active ? "active" : "")"
+                                aria-selected="@(active ? "true" : "false")"
+                                aria-controls="tab-panel"
+                                tabindex="@(active ? 0 : -1)"
+                                @ref="_tabButtons[id]"
+                                @onclick="() => OpenTab(id)"
+                                @onkeydown="e => OnTabKey(e, id)">
+                            @tab.Title
+                        </button>
+                    }
+                }
+            </nav>
+        </div>
+    </header>
+
+    <main class="container page" role="tabpanel" id="tab-panel" aria-labelledby="tab-@_activeTab">
+        @switch (_activeTab)
+        {
+            case "plan":
+                <PlanTab Inputs="_inputs"
+                         Report="_lastReport"
+                         SearchedFrom="@_lastQuery?.Origin"
+                         SearchedTo="@_lastQuery?.Destination"
+                         PricedPassengers="_pricedPassengers"
+                         PricedSnapshot="_pricedSnapshot"
+                         ValidationWarning="@_validationWarning"
+                         @bind-SelectedStep="_selectedStep"
+                         CanUndo="AppState.CanUndo"
+                         CanRedo="AppState.CanRedo"
+                         OnSearch="ExecutePlannerPipeline"
+                         OnUndo="HandleUndo"
+                         OnRedo="HandleRedo"
+                         OnUnknownStationDemo="TriggerNothingDemo"
+                         OnServiceFailureDemo="TriggerErrorDemo"
+                         OnRetry="ClearFailuresAndSearchAgain"
+                         OnRestoreValidStations="RestoreValidStations"
+                         OnBookTrip='() => OpenTab("bookings")'
+                         OnViewTimetable='() => OpenTab("timetable")' />
+                break;
+
+            case "bookings":
+                @* The key changes on every click on the tab, so the component starts afresh and reloads the history. *@
+                <BookingsTab @key="_bookingsOpened"
+                             State="_bookings"
+                             Report="_lastReport"
+                             PricedPassengers="_pricedPassengers"
+                             SearchId="_searchId"
+                             TravelDate="@(_pricedSnapshot?.TravelDate ?? _inputs.TravelDate)"
+                             DepartureTime="@(_pricedSnapshot?.Departure ?? _inputs.Departure)"
+                             IsStaleSearch="@(_pricedSnapshot is not null && !_inputs.Matches(_pricedSnapshot))"
+                             LoginHref="@LoginHrefFor("bookings")"
+                             Owner="@_userName"
+                             Origin="@(_pricedSnapshot?.Origin ?? _inputs.Origin)"
+                             OnPlanTrip='() => OpenTab("plan")' />
+                break;
+
+            case "timetable":
+                <TimetableTab Route="PricedRoute"
+                              TravelDate="@(_pricedSnapshot?.TravelDate ?? _inputs.TravelDate)"
+                              Departure="@(_pricedSnapshot?.Departure ?? _inputs.Departure)"
+                              OnPlanTrip='() => OpenTab("plan")' />
+                break;
+
+            case "network":
+                <NetworkTab />
+                break;
+
+            case "dispatcher":
+                <DispatcherTab Feed="AppState.ActivityFeed"
+                               SignedInName="@_signedInName" />
+                break;
+
+            case "lab":
+                <LabTab State="_lab" Origin="@_inputs.Origin" Destination="@_inputs.Destination" />
+                break;
+        }
+    </main>
+</CascadingValue>
+</CascadingValue>
+
+@code {
+    private sealed record TabInfo(string Id, string Title, string? Group);
+
+    private static readonly TabInfo[] PassengerTabs =
+    [
+        new("plan", "Plan a trip", null),
+        new("bookings", "Bookings", null),
+        new("timetable", "Timetable", null)
+    ];
+
+    private static readonly TabInfo[] DispatcherTabs =
+    [
+        new("network", "Network", "Operations"),
+        new("dispatcher", "Dispatcher", "Operations")
+    ];
+
+    private static readonly TabInfo[] CourseTabs = [new("lab", "Lab", "Course")];
+
+    private IEnumerable<TabInfo> VisibleTabs =>
+        PassengerTabs
+            .Concat(IsDispatcher ? DispatcherTabs : [])
+            .Concat(_viewOptions.ShowCourseNotes ? CourseTabs : []);
+
+    // The open tab and optional trip parameters are read from the address (?tab=bookings&from=MILAN&to=ZURICH...),
+    // so links, reload, sign-in redirects and the browser's Back button preserve the user's chosen trip.
+    [SupplyParameterFromQuery(Name = "tab")]
+    public string? Tab { get; set; }
+
+    [SupplyParameterFromQuery(Name = "from")]
+    public string? QueryFrom { get; set; }
+
+    [SupplyParameterFromQuery(Name = "to")]
+    public string? QueryTo { get; set; }
+
+    [SupplyParameterFromQuery(Name = "pax")]
+    public int? QueryPassengers { get; set; }
+
+    [SupplyParameterFromQuery(Name = "date")]
+    public string? QueryDate { get; set; }
+
+    [SupplyParameterFromQuery(Name = "dep")]
+    public string? QueryDeparture { get; set; }
+
+    [SupplyParameterFromQuery(Name = "pkg")]
+    public string? QueryPackage { get; set; }
+
+    private string _activeTab = "plan";
+    private readonly Dictionary<string, ElementReference> _tabButtons = new();
+    private string? _focusTab;
+    private ViewOptions _viewOptions = ViewOptions.Default;
+
+    // Trip search, used by several tabs
+    private readonly PlannerInputs _inputs = new();
+    private int _pricedPassengers = 2;
+    private PlannerFormSnapshot? _pricedSnapshot;
+    private string? _validationWarning;
+    private PipelineExecutionReport? _lastReport;
+    private ValidRouteQuery? _lastQuery;
+    private int _searchId;
+    private PipelineStepDiagnostic? _selectedStep;
+
+    // What the tabs remember between visits (only the open tab's component exists at any time)
+    private readonly BookingsTabState _bookings = new();
+    private readonly LabTabState _lab = new();
+    private int _bookingsOpened;
+
+    [CascadingParameter]
+    private Task<AuthenticationState>? AuthenticationStateTask { get; set; }
+
+    private string? _signedInName;
+    private string _userName = "";
+
+    // The role comes from the auth cookie (read once when the circuit starts), so the checks below are server-side.
+    private bool IsDispatcher => AppState.CurrentRole == UserRole.Dispatcher;
+
+    private PlannedRoute? PricedRoute =>
+        _lastReport?.Outcome is Something<PricedItinerary> { InnerValue: var it } ? it.TrafficRoute.Route : null;
+
+    private string LoginHrefFor(string tab) =>
+        PlannerInputs.BuildLoginHref(tab, _pricedSnapshot ?? _inputs.ToSnapshot(DateTime.UtcNow));
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (AuthenticationStateTask is not null)
+        {
+            var user = (await AuthenticationStateTask).User;
+            if (user.Identity?.IsAuthenticated == true)
+            {
+                _signedInName = user.FindFirst(RoleNames.DisplayNameClaim)?.Value ?? user.Identity.Name;
+                _userName = user.Identity.Name ?? "";
+            }
+            AppState.SetRole(RoleNames.FromPrincipal(user));
+        }
+
+        AppState.OnStateChanged += HandleStateChanged;
+        Operations.OnTrafficAlertBroadcast += HandleTrafficAlert;
+
+        _inputs.LoadFrom(AppState.CurrentSnapshot);
+        var restoredFromUrl = _inputs.ApplyQueryParameters(QueryFrom, QueryTo, QueryPassengers, QueryDate, QueryDeparture, QueryPackage);
+        ExecutePlannerPipelineInternal(commitHistory: restoredFromUrl);
+    }
+
+    // Runs on the first render and whenever the ?tab= part of the address changes (a click, Back, a link).
+    // A tab that is not offered to this visitor cannot be opened, whatever the address says.
+    protected override void OnParametersSet()
+    {
+        var requested = VisibleTabs.Any(t => t.Id == Tab) ? Tab! : "plan";
+        if (requested == _activeTab)
+            return;
+
+        _activeTab = requested;
+        if (requested == "bookings")
+            _bookingsOpened++;
+    }
+
+    private void OpenTab(string id)
+    {
+        if (!VisibleTabs.Any(t => t.Id == id))
+            return;
+
+        // Clicking the open Bookings tab again reloads its history.
+        if (id == _activeTab)
+        {
+            if (id == "bookings")
+                _bookingsOpened++;
+            return;
+        }
+
+        Navigation.NavigateTo(Navigation.GetUriWithQueryParameter("tab", id == "plan" ? null : id));
+    }
+
+    // Arrow keys move between tabs, Home and End jump to the first and last (WAI-ARIA tabs pattern).
+    private void OnTabKey(KeyboardEventArgs e, string id)
+    {
+        var ids = VisibleTabs.Select(t => t.Id).ToList();
+        var index = ids.IndexOf(id);
+        var target = e.Key switch
+        {
+            "ArrowRight" => ids[(index + 1) % ids.Count],
+            "ArrowLeft" => ids[(index - 1 + ids.Count) % ids.Count],
+            "Home" => ids[0],
+            "End" => ids[^1],
+            _ => null
+        };
+        if (target is null)
+            return;
+
+        _focusTab = target;
+        OpenTab(target);
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (_focusTab is { } id && _tabButtons.TryGetValue(id, out var button))
+        {
+            _focusTab = null;
+            await button.FocusAsync();
+        }
+    }
+
+    private void ToggleCourseNotes()
+    {
+        _viewOptions = _viewOptions with { ShowCourseNotes = !_viewOptions.ShowCourseNotes };
+        if (!VisibleTabs.Any(t => t.Id == _activeTab))
+            Navigation.NavigateTo(Navigation.GetUriWithQueryParameter("tab", (string?)null), replace: true);
+    }
+
+    private void HandleStateChanged() => InvokeAsync(StateHasChanged);
+
+    // Raised on whichever thread changed the shared controller (another user's circuit or the hub),
+    // so the update is marshalled onto this circuit's dispatcher before touching its state.
+    // Engineering works may have changed the fare, so a trip on screen is priced again; the progress
+    // of a booking already made is kept.
+    private void HandleTrafficAlert(string alert) =>
+        InvokeAsync(() =>
+        {
+            AppState.AppendFeedMessage(alert);
+            RepriceLastSearch();
+            StateHasChanged();
+        });
+
+    // --- Trip search ---
+
+    private void ExecutePlannerPipeline() => ExecutePlannerPipelineInternal(commitHistory: true);
+
+    private void ExecutePlannerPipelineInternal(bool commitHistory)
+    {
+        if (_bookings.UnsavedPaidReceipt is not null)
+        {
+            _validationWarning = "A payment is waiting to be saved. Open Bookings and retry saving it before starting another search.";
+            return;
+        }
+
+        var validation = RailwayPipelineOrchestrator.ValidateInput(
+            _inputs.Origin, _inputs.Destination, _inputs.Passengers, _inputs.ToOffering());
+
+        _validationWarning = validation switch
+        {
+            EmptyRouteQuery { FieldName: var f } => $"Please enter the {f.ToLowerInvariant()}.",
+            SameStationError { Station: var s } => $"From and To are the same station ({UiText.Station(s)}).",
+            InvalidPassengerCount => "Choose between 1 and 50 passengers.",
+            _ when _inputs.TravelDate < DateOnly.FromDateTime(DateTime.Today) => "Choose a travel date from today on.",
+            _ => null
+        };
+
+        // Any new search, valid or not, clears the progress list of the previous booking attempt
+        // and can be booked again.
+        _searchId++;
+        _bookings.ClearStages();
+
+        // Only a ValidRouteQuery reaches the pipeline; every other case of the union stops here with its message,
+        // so an invalid search can never be priced or booked.
+        if (validation is not ValidRouteQuery query || _validationWarning is not null)
+        {
+            _lastReport = null;
+            _pricedSnapshot = null;
+            _selectedStep = null;
+            return;
+        }
+
+        var snapshot = _inputs.ToSnapshot(DateTime.UtcNow);
+        if (commitHistory)
+            AppState.CommitSnapshot(snapshot);
+
+        _pricedSnapshot = snapshot;
+        _lastQuery = query;
+        PriceQuery(query);
+    }
+
+    // Prices the last valid search again (not what is typed in the form now), for example after another
+    // dispatcher changed engineering works. The progress of a booking already made is kept.
+    private void RepriceLastSearch()
+    {
+        if (_lastQuery is not null && _lastReport is not null)
+            PriceQuery(_lastQuery);
+    }
+
+    private void PriceQuery(ValidRouteQuery query)
+    {
+        _pricedPassengers = query.Passengers;
+        _lastReport = Orchestrator.ExecutePipeline(query.Origin, query.Destination, query.Offering, query.Passengers)
+            .Tap(report => Logger.SearchOutcome(report, query.Origin, query.Destination));
+        _selectedStep = _lastReport.Diagnostics.LastOrDefault(d => d.Status != StepStatus.Skipped) ?? _lastReport.Diagnostics.LastOrDefault();
+    }
+
+    private void TriggerNothingDemo()
+    {
+        _inputs.Origin = "LONDON";
+        _inputs.Destination = "ATLANTIS";
+        ExecutePlannerPipelineInternal(commitHistory: true);
+    }
+
+    private void TriggerErrorDemo()
+    {
+        if (!IsDispatcher) return;
+        Operations.SimulateTrafficMonitorCrash = true;
+        ExecutePlannerPipelineInternal(commitHistory: false);
+        AppState.AppendFeedMessage("Simulated failure of the engineering works feed (from the planner).");
+    }
+
+    private void ClearFailuresAndSearchAgain()
+    {
+        if (!IsDispatcher) return;
+        Operations.SimulateMappingServiceCrash = false;
+        Operations.SimulateRoutePlannerCrash = false;
+        Operations.SimulateTrafficMonitorCrash = false;
+        Operations.SimulatePricingCrash = false;
+        Operations.SimulatePaymentOutage = false;
+        ExecutePlannerPipelineInternal(commitHistory: false);
+    }
+
+    // Available to everyone: puts a known-good route back in the form and searches again.
+    // It does not touch the shared failure switches; only a dispatcher can clear those.
+    private void RestoreValidStations()
+    {
+        _inputs.Origin = "LONDON";
+        _inputs.Destination = "ZURICH";
+        ExecutePlannerPipelineInternal(commitHistory: true);
+    }
+
+    private void HandleUndo()
+    {
+        AppState.Undo();
+        _inputs.LoadFrom(AppState.CurrentSnapshot);
+        ExecutePlannerPipelineInternal(commitHistory: false);
+    }
+
+    private void HandleRedo()
+    {
+        AppState.Redo();
+        _inputs.LoadFrom(AppState.CurrentSnapshot);
+        ExecutePlannerPipelineInternal(commitHistory: false);
+    }
+
+    public void Dispose()
+    {
+        AppState.OnStateChanged -= HandleStateChanged;
+        Operations.OnTrafficAlertBroadcast -= HandleTrafficAlert;
+    }
+}

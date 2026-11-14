@@ -4,4 +4,7 @@
     <Project Path="src/RailFlow.Infrastructure/RailFlow.Infrastructure.csproj" />
     <Project Path="src/RailFlow.Web/RailFlow.Web.csproj" />
   </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/RailFlow.Tests/RailFlow.Tests.csproj" />
+  </Folder>
 </Solution>
