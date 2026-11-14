@@ -1,0 +1,31 @@
+@page "/Error"
+@using System.Diagnostics
+
+<PageTitle>Error — RailFlow</PageTitle>
+
+<main class="login-page">
+    <section class="card login-card">
+        <h1>Something went wrong</h1>
+        <p class="card-sub">The server could not finish this request. Please try again in a moment.</p>
+
+        @if (ShowRequestId)
+        {
+            <p class="muted small">If you report the problem, include this reference: <code>@RequestId</code></p>
+        }
+
+        <div class="actions">
+            <a class="btn btn-primary" href="">Back to the planner</a>
+        </div>
+    </section>
+</main>
+
+@code {
+    [CascadingParameter]
+    private HttpContext? HttpContext { get; set; }
+
+    private string? RequestId { get; set; }
+    private bool ShowRequestId => !string.IsNullOrEmpty(RequestId);
+
+    protected override void OnInitialized() =>
+        RequestId = Activity.Current?.Id ?? HttpContext?.TraceIdentifier;
+}
