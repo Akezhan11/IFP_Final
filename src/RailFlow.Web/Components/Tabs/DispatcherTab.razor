@@ -1,0 +1,147 @@
+@* Dispatcher tab: engineering works, simulated failures, announcements and the activity feed.
+   Every action checks the cascaded role again, so hiding the controls is not the only protection. *@
+
+@inject OperationsControls Operations
+@inject IMappingSystem MappingSystem
+@inject ILogger<DispatcherTab> Logger
+
+<div class="grid-2">
+    <div class="stack">
+        <section class="card">
+            <div class="card-head">
+                <div>
+                    <h2>Engineering works</h2>
+                    <p class="card-sub">Connections to a marked station cost @UiText.PercentChange(Operations.EngineeringWorksMultiplier) on the affected section. Changes apply to every user at once.</p>
+                </div>
+            </div>
+
+            @if (!IsDispatcher)
+            {
+                <div class="alert">
+                    <strong>Dispatchers only</strong>
+                    <p><a href="login">Sign in</a> with a dispatcher account to change these settings.</p>
+                </div>
+            }
+            else
+            {
+                <div class="check-grid">
+                    @foreach (var st in Stations)
+                    {
+                        var stationCode = st.StationCode;
+                        <label class="check">
+                            <input type="checkbox" class="switch" checked="@Operations.HasEngineeringWorksAt(stationCode)" @onchange="() => ToggleEngineeringWorks(stationCode)" />
+                            @UiText.Station(stationCode)
+                        </label>
+                    }
+                </div>
+            }
+
+            <HowItWorks>
+                Engineering works live in one shared <code>OperationsControls</code>. Its station set is an
+                <code>ImmutableHashSet</code> replaced atomically, so two dispatchers changing it at the same moment
+                cannot lose an update; its event updates every open session and is forwarded to SignalR clients.
+            </HowItWorks>
+        </section>
+
+        @if (IsDispatcher)
+        {
+            <section class="card">
+                <div class="card-head">
+                    <div>
+                        <h2>Simulated service failures</h2>
+                        <p class="card-sub">For testing outages. Every user's searches or payments fail while a switch is on.</p>
+                    </div>
+                </div>
+                <div class="check-list">
+                    <label class="check"><input type="checkbox" class="switch danger" @bind="Operations.SimulateMappingServiceCrash" /> Station lookup fails</label>
+                    <label class="check"><input type="checkbox" class="switch danger" @bind="Operations.SimulateRoutePlannerCrash" /> Route planner fails</label>
+                    <label class="check"><input type="checkbox" class="switch danger" @bind="Operations.SimulateTrafficMonitorCrash" /> Engineering works feed fails</label>
+                    <label class="check"><input type="checkbox" class="switch danger" @bind="Operations.SimulatePricingCrash" /> Fare calculation fails</label>
+                    <label class="check"><input type="checkbox" class="switch danger" @bind="Operations.SimulatePaymentOutage" /> Payment provider is down</label>
+                </div>
+
+                <HowItWorks>
+                    A simulated failure makes the service return an <code>Error</code> value (or a <code>Failure</code> for
+                    payments) instead of throwing, so the planner and booking pages show a message and keep working.
+                </HowItWorks>
+            </section>
+        }
+    </div>
+
+    <section class="card">
+        <div class="card-head">
+            <div>
+                <h2>Activity</h2>
+                <p class="card-sub">Updates appear in every open browser tab.</p>
+            </div>
+        </div>
+
+        @if (IsDispatcher)
+        {
+            <form class="inline" style="margin-bottom:0.75rem;" @onsubmit="SendAnnouncement">
+                <label for="announcement" class="visually-hidden">Announcement</label>
+                <input id="announcement" @bind="_announcement" @bind:event="oninput" maxlength="140" placeholder="Announcement to all users" autocomplete="off" />
+                <button type="submit" class="btn btn-sm btn-primary" disabled="@string.IsNullOrWhiteSpace(_announcement)">Send</button>
+            </form>
+        }
+
+        <ul class="activity">
+            @foreach (var entry in Feed)
+            {
+                var (time, text) = SplitFeedEntry(entry);
+                <li><time>@time</time>@text</li>
+            }
+        </ul>
+    </section>
+</div>
+
+@code {
+    /// <summary>Activity lines, newest first, each starting with "[HH:mm:ss] ".</summary>
+    [Parameter, EditorRequired]
+    public ImmutableList<string> Feed { get; set; } = ImmutableList<string>.Empty;
+
+    /// <summary>Display name of the signed-in user, used in the feed message.</summary>
+    [Parameter]
+    public string? SignedInName { get; set; }
+
+    /// <summary>
+    /// Cascaded by Home from the auth cookie. If nothing is cascaded the default is Passenger,
+    /// so the controls stay locked.
+    /// </summary>
+    [CascadingParameter]
+    public UserRole Role { get; set; }
+
+    private bool IsDispatcher => Role == UserRole.Dispatcher;
+
+    private string _announcement = "";
+
+    private IReadOnlyList<GeoCoord> Stations => _stations ??= MappingSystem.GetAllStations();
+    private IReadOnlyList<GeoCoord>? _stations;
+
+    /// <summary>
+    /// Starts or ends engineering works at a station. Passengers never see the switches, but the role is
+    /// checked here as well, on the server, so a call that arrives anyway changes nothing. Public so the
+    /// tests can call it directly. Open searches in every session, this one included, are priced again by
+    /// Home when the controller announces the change.
+    /// </summary>
+    public void ToggleEngineeringWorks(string stationCode)
+    {
+        if (!IsDispatcher) return;
+        var actor = $"Dispatcher {SignedInName}";
+        Operations.ToggleEngineeringWorks(stationCode, actor);
+        Logger.EngineeringWorksChanged(actor, stationCode, Operations.HasEngineeringWorksAt(stationCode) ? "on" : "off");
+    }
+
+    /// <summary>Same as the hub's BroadcastAdvisory: the message reaches every open session and SignalR client.</summary>
+    private void SendAnnouncement()
+    {
+        if (!IsDispatcher || string.IsNullOrWhiteSpace(_announcement)) return;
+        Operations.BroadcastCustomAdvisory($"Dispatcher {SignedInName}: {_announcement.Trim()}");
+        _announcement = "";
+    }
+
+    private static (string Time, string Text) SplitFeedEntry(string entry) =>
+        entry.Length > 11 && entry[0] == '[' && entry[9] == ']'
+            ? (entry[1..9], entry[11..])
+            : ("", entry);
+}
